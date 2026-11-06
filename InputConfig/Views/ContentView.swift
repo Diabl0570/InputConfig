@@ -241,6 +241,54 @@ struct ContentView: View {
     /// What's New closed: the version is seen, and an upgrade with
     /// Accessibility still off gets the intro that explains why no keys are
     /// sent, which waited for this sheet.
+    private func prepareMainWindow() {
+        // Hand the menu bar a way to reopen this window after it closes.
+        MenuBarController.shared.openMainScene = { [openWindow] in openWindow(id: "main") }
+        presetStore.reseedExamplePresets()
+        // Proactively explain + offer Accessibility on launch if it isn't
+        // granted, since macOS doesn't always surface its own prompt and
+        // the app's mappings can't fire without it.
+        accessibility.refresh()
+        // First launch: the welcome first, then the permission ask
+        // follows from its button. Later launches: the permission ask
+        // alone, if it is still needed.
+        // The welcome is for new installs. Someone updating from a version
+        // before it existed got the welcome and What's New at once.
+        // An upgrade is told by the version last seen: an older one, or
+        // none at all on an install from before What's New existed. The
+        // folder's age alone skipped the welcome for a new user who quit
+        // before finishing it and came back ten minutes later, since a
+        // first run stores this version straight away.
+        // A menu bar Settings or New Preset that recreated this window.
+        // Not over What's New, which is the sheet when it was asked
+        // first; the menu's Settings or About is asked again later.
+        if MenuBarController.takePendingMainAction(.settings), !showingWhatsNew { settingsSheetTab = .general }
+        if MenuBarController.takePendingMainAction(.about), !showingWhatsNew { settingsSheetTab = .about }
+        takePendingSheets()
+        var openedEditor = false
+        if MenuBarController.takePendingMainAction(.newPreset), editingPreset == nil, !anotherSheetIsUp {
+            createNewPreset()
+            openedEditor = true
+        }
+        let upgrading = lastSeenVersion.isEmpty
+            ? Self.looksLikeExistingInstall
+            : lastSeenVersion != Self.currentShortVersion
+        if !welcomeIntroSeen && upgrading {
+            welcomeIntroSeen = true
+        }
+        if openedEditor || settingsSheetTab != nil || OpenedPresetFiles.hasPending || !presetStore.importReviewQueue.isEmpty {
+            // The editor or an opened file's review is the sheet this
+            // time; the intros wait.
+        } else if upgrading {
+            // What's New is the sheet; the Accessibility intro follows
+            // when it closes (afterWhatsNew).
+        } else if !welcomeIntroSeen {
+            showingWelcomeIntro = true
+        } else if !accessibility.isTrusted && !suppressAccessibilityIntro {
+            showingAccessibilityIntro = true
+        }
+    }
+
     private func afterWhatsNew() {
         lastSeenVersion = Self.currentShortVersion
         guard !accessibility.isTrusted, !suppressAccessibilityIntro else { return }
@@ -610,53 +658,7 @@ struct ContentView: View {
             // included, on each update to work out the window's limits.
             .glassBackground()
         }
-        .onAppear {
-            // Hand the menu bar a way to reopen this window after it closes.
-            MenuBarController.shared.openMainScene = { [openWindow] in openWindow(id: "main") }
-            presetStore.reseedExamplePresets()
-            // Proactively explain + offer Accessibility on launch if it isn't
-            // granted, since macOS doesn't always surface its own prompt and
-            // the app's mappings can't fire without it.
-            accessibility.refresh()
-            // First launch: the welcome first, then the permission ask
-            // follows from its button. Later launches: the permission ask
-            // alone, if it is still needed.
-            // The welcome is for new installs. Someone updating from a version
-            // before it existed got the welcome and What's New at once.
-            // An upgrade is told by the version last seen: an older one, or
-            // none at all on an install from before What's New existed. The
-            // folder's age alone skipped the welcome for a new user who quit
-            // before finishing it and came back ten minutes later, since a
-            // first run stores this version straight away.
-            // A menu bar Settings or New Preset that recreated this window.
-            // Not over What's New, which is the sheet when it was asked
-            // first; the menu's Settings or About is asked again later.
-            if MenuBarController.takePendingMainAction(.settings), !showingWhatsNew { settingsSheetTab = .general }
-            if MenuBarController.takePendingMainAction(.about), !showingWhatsNew { settingsSheetTab = .about }
-            takePendingSheets()
-            var openedEditor = false
-            if MenuBarController.takePendingMainAction(.newPreset), editingPreset == nil, !anotherSheetIsUp {
-                createNewPreset()
-                openedEditor = true
-            }
-            let upgrading = lastSeenVersion.isEmpty
-                ? Self.looksLikeExistingInstall
-                : lastSeenVersion != Self.currentShortVersion
-            if !welcomeIntroSeen && upgrading {
-                welcomeIntroSeen = true
-            }
-            if openedEditor || settingsSheetTab != nil || OpenedPresetFiles.hasPending || !presetStore.importReviewQueue.isEmpty {
-                // The editor or an opened file's review is the sheet this
-                // time; the intros wait.
-            } else if upgrading {
-                // What's New is the sheet; the Accessibility intro follows
-                // when it closes (afterWhatsNew).
-            } else if !welcomeIntroSeen {
-                showingWelcomeIntro = true
-            } else if !accessibility.isTrusted && !suppressAccessibilityIntro {
-                showingAccessibilityIntro = true
-            }
-        }
+        .onAppear(perform: prepareMainWindow)
         // The close hook drops What's New too; its state lives here, not
         // in the hook modifier. A modifier rather than one more closure on
         // this chain, which the type-checker could not finish.

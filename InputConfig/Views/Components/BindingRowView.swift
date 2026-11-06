@@ -226,324 +226,35 @@ struct BindingRowView: View {
     }
 
     private var rowBody: some View {
+        styledRow
+        .debugExpandOptions($showAdvanced)
+        .modifier(DebugToggleOptionsModifier(displayNumber: displayNumber, toggle: toggleOptions, adjustLive: { showDeadzoneCalibration = true }))
+        .sheet(isPresented: $showDeadzoneCalibration) {
+            deadzoneCalibrationSheet
+        }
+        // The group's Regions section sends you back here.
+        .modifier(RevealRowOnRequest(rowID: binding.id))
+        .onReceive(NotificationCenter.default.publisher(
+            for: Notification.Name("InputConfig.ExpandBindingOptions")), perform: expandOptions)
+        // The live mirrors only follow a drag. Once the row's committed
+        // values change (a release, Undo, Stick settings) or Options
+        // closes, drop them so a readout never shows an old value.
+        .onChange(of: binding) { _, _ in clearLiveMirrors() }
+        .onChange(of: showAdvanced) { _, open in if !open { clearLiveMirrors() } }
+        .onDisappear {
+            // Cancel any in-flight scan when this row goes away.
+            // Without this, closing the editor mid-scan leaves the
+            // static timer/subscription alive; when its 5-second
+            // deadline fires it writes into a `@Binding` whose source
+            // is gone, routing the keypress to a stale preset draft.
+            Self.cancelActiveScan()
+        }
+    }
+
+    private var rowContent: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Primary row
-            HStack(spacing: colGap) {
-                // Drag handle, far left so the row reads handle, number, then
-                // the binding itself. This is the only drag source on the
-                // row, so menus and text never start a drag by accident.
-                // A direct drag gesture, not `.onDrag`. An NSItemProvider drag
-                // hands the reorder to AppKit's drag session: the pointer gets
-                // a small snapshot of the handle instead of the row, and every
-                // reorder decision has to round-trip through a DropDelegate,
-                // which is what made dragging feel heavy and detached. The
-                // gesture lets the parent lift the whole row under the pointer
-                // and move it in place.
-                Image(systemName: "line.3.horizontal")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .frame(width: dragWidth, height: 22)
-                    .contentShape(Rectangle())
-                    .overlay(
-                        // An AppKit tracking view, not a SwiftUI DragGesture.
-                        // Two reasons. A SwiftUI gesture is torn down whenever
-                        // the row's body re-runs, so anything that changes the
-                        // row mid-drag - folding its Options away, the list
-                        // reordering - silently cancels the drag and the row
-                        // is left stranded. And SwiftUI reports translation in
-                        // a space that moves with the row we are offsetting,
-                        // which makes the reading feed on its own output and
-                        // the row shake. This view persists across body
-                        // updates and measures against the screen.
-                        RowDragHandle(
-                            onBegan: {
-                                if showAdvanced {
-                                    var t = Transaction()
-                                    t.disablesAnimations = true
-                                    withTransaction(t) { showAdvanced = false }
-                                }
-                            },
-                            onChanged: { onDragChanged?($0) },
-                            onEnded: { onDragEnded?() }
-                        )
-                    )
-                    .help("Drag to reorder")
-                    .accessibilityLabel("Reorder handle")
-                    .accessibilityHint("Drag to reorder, or use Move Up and Move Down")
-                    // Without dragging: a right-click menu (pointer, dwell and
-                    // Voice Control), the arrow keys once focused (keyboard),
-                    // and actions (VoiceOver, Switch Control).
-                    .contextMenu {
-                        Button("Move Up") { onMove?(-1) }
-                        Button("Move Down") { onMove?(1) }
-                    }
-                    .focusable(onMove != nil)
-                    .onKeyPress(.upArrow) { onMove?(-1); return onMove == nil ? .ignored : .handled }
-                    .onKeyPress(.downArrow) { onMove?(1); return onMove == nil ? .ignored : .handled }
-                    .accessibilityAction(named: "Move Up") { onMove?(-1) }
-                    .accessibilityAction(named: "Move Down") { onMove?(1) }
-
-                // Row number chip - matches the number shown in the Live
-                // Visualizer popover so users can find the right row when
-                // they click an input on the visualizer.
-                if displayNumber > 0 {
-                    Text("#\(displayNumber)")
-                        .font(.callout.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color.secondary.opacity(0.12))
-                        )
-                        .frame(width: numberColWidth, alignment: .leading)
-                }
-
-                // Non-color firing cue: the green highlight alone isn't
-                // distinguishable with Differentiate Without Color on, so add
-                // a bolt while the row is firing. VoiceOver hears the firing
-                // state from the Input box's value, hence the hidden marker.
-                if isHighlighted && differentiateWithoutColor {
-                    Image(systemName: "bolt.fill")
-                        .font(.callout)
-                        .iconTint(.green)
-                        .accessibilityHidden(true)
-                }
-
-                // INPUT box: scan + type + index + direction, enclosed so
-                // the row reads as "this input" -> "these outputs".
-                HStack(spacing: gap) {
-                // COL 1: Scan
-                Button("Scan", action: onScan)
-                    .buttonStyle(.solidSecondaryCompact)
-                    .frame(width: scanColWidth, alignment: .center)
-                    .focused($keyboardFocus)
-                    .accessibilityLabel("Scan binding \(displayNumber)")
-                    .accessibilityInputLabels([Text("Scan"), Text("Scan binding \(displayNumber)")])
-                    .accessibilityHint("Press a button, key, or axis on your controller to record this binding")
-
-                // COL 2: Input Type. A lazy Menu (matching KeyCodePicker and
-                // the index picker) instead of Picker: NSPopUpButton-backed
-                // Pickers pre-build every item on row creation, which made
-                // scrolling the binding list hitch as rows materialized.
-                // Grouped so the first decision on every row is no longer an
-                // undifferentiated 11-item list.
-                SearchableMenu(choices: { inputTypeSearchChoices }) {
-                    Section("Controller") {
-                        inputTypeChoice(.button)
-                        inputTypeChoice(.axis)
-                        inputTypeChoice(.hat)
-                        inputTypeChoice(.stickGesture)
-                    }
-                    Section("Touchpad") {
-                        inputTypeChoice(.touchpad)
-                        inputTypeChoice(.touchpadRegion)
-                        inputTypeChoice(.touchpadGesture)
-                    }
-                    Section("This Mac") {
-                        inputTypeChoice(.chassisTap)
-                    }
-                    Section("Motion") {
-                        inputTypeChoice(.motion)
-                    }
-                    Section("Keyboard and mouse") {
-                        inputTypeChoice(.extKey)
-                        inputTypeChoice(.extMouse)
-                    }
-                    // Stick zones and trigger bands are part of an axis, picked
-                    // in the axis menu; a screen region is its own input.
-                    Section("Screen") {
-                        inputTypeChoice(.cursorRegion)
-                    }
-                    Section("MIDI") {
-                        inputTypeChoice(.midi)
-                    }
-                } label: {
-                    menuChevronLabel(typeMenuTitle)
-                }
-                .menuStyle(.borderlessButton)
-                .controlSize(.small)
-                .frame(width: typeColWidth, alignment: .leading)
-                .accessibilityLabel("Input type")
-                .accessibilityValue(typeMenuTitle)
-                // Voice Control answers to the word shown first.
-                .accessibilityInputLabels([Text(typeMenuTitle), Text("Input type"),
-                                           Text("Input type \(displayNumber)")])
-
-                // COL 3: Index
-                indexPicker
-                    .frame(width: indexColWidth, alignment: .leading)
-                    .accessibilityLabel(indexPickerAccessibilityLabel)
-                    .accessibilityValue(indexPickerAccessibilityValue)
-                    .accessibilityInputLabels([Text(indexPickerAccessibilityValue), Text(indexPickerAccessibilityLabel)])
-
-                // COL 4: Direction (or empty spacer for Button type)
-                directionPicker
-                    .frame(width: dirColWidth, alignment: .leading)
-                    .accessibilityLabel(directionPickerAccessibilityLabel)
-                    .accessibilityValue(directionPickerAccessibilityValue)
-                    .accessibilityInputLabels([Text(directionPickerAccessibilityValue), Text(directionPickerAccessibilityLabel)])
-
-                }
-                .padding(.horizontal, Self.boxPadH)
-                .padding(.vertical, Self.boxPadV)
-                .accessibilityElement(children: .contain)
-                .accessibilityLabel("Input")
-                .accessibilityValue(isHighlighted ? String(localized: "Firing") : "")
-
-                // Fixed-position arrow right after the input columns. The two
-                // flexible `maxWidth: .infinity` halves that used to center it
-                // forced SwiftUI to renegotiate each row's width with repeated
-                // sizeThatFits probes; on a large preset that pegged the main
-                // thread solid. Only the output side stays flexible now, so the
-                // row lays out in a single pass.
-                firingArrow
-
-                // OUTPUT box: icon + type + value, with any extra outputs
-                // stacked beneath inside the same box. Row actions sit
-                // outside it at the trailing edge.
-                VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: gap) {
-                if binding.outputs.isEmpty {
-                    // A row laid out by "every control" waits here for its
-                    // output; picking one creates it with that type's
-                    // defaults, and the normal controls take over.
-                    outputMenu(select: { type in
-                            var action = OutputAction(type: .key, keyCode: 4)
-                            action.type = type
-                            action.fillDefaultsForType()
-                            binding.outputs = [action]
-                        }, selectSystemKind: { kind in
-                            var action = OutputAction(type: .systemAction, keyCode: 4)
-                            action.systemActionKind = kind
-                            binding.outputs = [action]
-                        }, setParameter: { text in
-                            guard !binding.outputs.isEmpty else { return }
-                            binding.outputs[0].text = text
-                        }, setAppAction: { kind, presetID in
-                            var action = OutputAction(type: .appAction)
-                            action.appActionKind = kind
-                            action.targetPresetID = presetID
-                            binding.outputs = [action]
-                        }, setKey: { code in
-                            binding.outputs = [OutputAction(type: .key, keyCode: code)]
-                        }) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "plus.circle")
-                            Text("Choose an output")
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 9, weight: .semibold))
-                        }
-                        .font(.callout)
-                        .foregroundStyle(Color.accentColor)
-                    }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .accessibilityLabel("Choose an output")
-                }
-                if !binding.outputs.isEmpty {
-                    HStack(spacing: gap) {
-                        outputIconCell(for: binding.outputs[0])
-
-                        outputMenu(select: { firstOutputTypeBinding.wrappedValue = $0 },
-                                   selectSystemKind: { kind in
-                                       guard !binding.outputs.isEmpty else { return }
-                                       binding.outputs[0].type = .systemAction
-                                       binding.outputs[0].systemActionKind = kind
-                                   },
-                                   setParameter: { text in
-                                       guard !binding.outputs.isEmpty else { return }
-                                       binding.outputs[0].text = text
-                                   },
-                                   setAppAction: { kind, presetID in
-                                       guard !binding.outputs.isEmpty else { return }
-                                       binding.outputs[0].type = .appAction
-                                       binding.outputs[0].appActionKind = kind
-                                       binding.outputs[0].targetPresetID = presetID
-                                   },
-                                   setKey: { code in
-                                       guard !binding.outputs.isEmpty else { return }
-                                       binding.outputs[0].type = .key
-                                       binding.outputs[0].keyCode = code
-                                   },
-                                   keyInShortcut: OutputAction.isShortcut(Array(binding.outputs.dropFirst()))) {
-                            menuChevronLabel(outputMenuTitle(binding.outputs[0]))
-                        }
-                        .menuStyle(.borderlessButton)
-                        .controlSize(.small)
-                        .accessibilityLabel("Output type")
-                        .accessibilityValue(outputMenuTitle(binding.outputs[0]))
-                        .accessibilityInputLabels([Text(outputMenuTitle(binding.outputs[0])), Text("Output type"),
-                                                   Text("Output type \(displayNumber)")])
-                    }
-                    .frame(width: outTypeColWidth, alignment: .leading)
-
-                    // Output value (flexible)
-                    outputValueControls(at: 0)
-
-                    if binding.outputs.count > 1 {
-                        Button {
-                            removeOutput(at: 0)
-                        } label: {
-                            Image(systemName: "xmark.circle")
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Remove this output")
-                    }
-                }
-                Spacer(minLength: 0)
-                }
-                secondaryOutputRows
-                if !binding.outputs.isEmpty {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            binding.outputs.append(OutputAction(type: .key, keyCode: 4))
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "plus.circle")
-                            Text("Add another output")
-                        }
-                        .font(.callout)
-                        .foregroundStyle(Color.accentColor)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.leading, 16 + gap)
-                    .padding(.top, 2)
-                    .accessibilityLabel("Add output")
-                    .accessibilityInputLabels([Text("Add output"), Text("Add output \(displayNumber)")])
-                }
-                }
-                .padding(.horizontal, Self.boxPadH)
-                .padding(.vertical, Self.boxPadV)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityElement(children: .contain)
-                .accessibilityLabel("Output")
-
-                // Actions: copy and delete. Adding an output is a labeled
-                // button under the outputs, not a corner icon.
-                HStack(spacing: 3) {
-                    if let onDuplicate {
-                        CopyIconButton(action: onDuplicate,
-                                       helpText: "Duplicate this binding",
-                                       announcement: nil)
-                            .accessibilityLabel("Duplicate this binding")
-                    }
-
-                    Button(action: onRemove) {
-                        Image(systemName: "minus.circle.fill")
-                            .foregroundStyle(.red.opacity(0.7))
-                            .font(.callout)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Remove binding")
-                    .accessibilityInputLabels([Text("Remove binding"), Text("Remove binding \(displayNumber)")])
-                }
-                .frame(width: actionsWidth + 18, alignment: .trailing)
-            }
+            primaryRow
 
             // Tap the Mac reads a sensor only some MacBooks have; the row says so.
             if binding.input.type == .chassisTap {
@@ -568,6 +279,10 @@ struct BindingRowView: View {
                 .padding(.top, 5)
                 .padding(.bottom, 1)
         }
+    }
+
+    private var styledRow: some View {
+        rowContent
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(
@@ -605,48 +320,359 @@ struct BindingRowView: View {
         )
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
-        .debugExpandOptions($showAdvanced)
-        .modifier(DebugToggleOptionsModifier(displayNumber: displayNumber, toggle: toggleOptions, adjustLive: { showDeadzoneCalibration = true }))
-        .sheet(isPresented: $showDeadzoneCalibration) {
-            DeadzoneCalibrationView(
-                axisIndex: binding.input.type == .stickRegion ? zoneRowAxis : binding.input.index,
-                deadzone: deadzoneCalibrationBinding,
-                outerDeadzone: outerDeadzoneBinding,
-                isInverted: binding.invertAxis ?? false,
-                onClose: { showDeadzoneCalibration = false },
-                slot: slot,
-                rowID: binding.id,
-                zonesKey: zonesSheetKey,
-                direction: binding.input.type == .axis ? binding.input.axisDirection : nil,
-                fullTravel: binding.fullTravel == true
-            )
-            .glassBackground()
+    }
+
+    private func expandOptions(_ note: Notification) {
+        // Tutorial / external trigger to auto-expand this row's
+        // Options disclosure so the user sees what's inside
+        // without having to click. Notification's object is the
+        // target binding's UUID; we only react if it matches us.
+        if let id = note.object as? UUID, id == binding.id {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.4)) { showAdvanced = true }
         }
-        // The group's Regions section sends you back here.
-        .modifier(RevealRowOnRequest(rowID: binding.id))
-        .onReceive(NotificationCenter.default.publisher(
-            for: Notification.Name("InputConfig.ExpandBindingOptions"))) { note in
-            // Tutorial / external trigger to auto-expand this row's
-            // Options disclosure so the user sees what's inside
-            // without having to click. Notification's object is the
-            // target binding's UUID; we only react if it matches us.
-            if let id = note.object as? UUID, id == binding.id {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.4)) { showAdvanced = true }
+    }
+
+    private var inputBox: some View {
+        HStack(spacing: gap) {
+        // COL 1: Scan
+        Button("Scan", action: onScan)
+            .buttonStyle(.solidSecondaryCompact)
+            .frame(width: scanColWidth, alignment: .center)
+            .focused($keyboardFocus)
+            .accessibilityLabel("Scan binding \(displayNumber)")
+            .accessibilityInputLabels([Text("Scan"), Text("Scan binding \(displayNumber)")])
+            .accessibilityHint("Press a button, key, or axis on your controller to record this binding")
+
+        // COL 2: Input Type. A lazy Menu (matching KeyCodePicker and
+        // the index picker) instead of Picker: NSPopUpButton-backed
+        // Pickers pre-build every item on row creation, which made
+        // scrolling the binding list hitch as rows materialized.
+        // Grouped so the first decision on every row is no longer an
+        // undifferentiated 11-item list.
+        SearchableMenu(choices: { inputTypeSearchChoices }) {
+            Section("Controller") {
+                inputTypeChoice(.button)
+                inputTypeChoice(.axis)
+                inputTypeChoice(.hat)
+                inputTypeChoice(.stickGesture)
+            }
+            Section("Touchpad") {
+                inputTypeChoice(.touchpad)
+                inputTypeChoice(.touchpadRegion)
+                inputTypeChoice(.touchpadGesture)
+            }
+            Section("This Mac") {
+                inputTypeChoice(.chassisTap)
+            }
+            Section("Motion") {
+                inputTypeChoice(.motion)
+            }
+            Section("Keyboard and mouse") {
+                inputTypeChoice(.extKey)
+                inputTypeChoice(.extMouse)
+            }
+            // Stick zones and trigger bands are part of an axis, picked
+            // in the axis menu; a screen region is its own input.
+            Section("Screen") {
+                inputTypeChoice(.cursorRegion)
+            }
+            Section("MIDI") {
+                inputTypeChoice(.midi)
+            }
+        } label: {
+            menuChevronLabel(typeMenuTitle)
+        }
+        .menuStyle(.borderlessButton)
+        .controlSize(.small)
+        .frame(width: typeColWidth, alignment: .leading)
+        .accessibilityLabel("Input type")
+        .accessibilityValue(typeMenuTitle)
+        // Voice Control answers to the word shown first.
+        .accessibilityInputLabels([Text(typeMenuTitle), Text("Input type"),
+                                   Text("Input type \(displayNumber)")])
+
+        // COL 3: Index
+        indexPicker
+            .frame(width: indexColWidth, alignment: .leading)
+            .accessibilityLabel(indexPickerAccessibilityLabel)
+            .accessibilityValue(indexPickerAccessibilityValue)
+            .accessibilityInputLabels([Text(indexPickerAccessibilityValue), Text(indexPickerAccessibilityLabel)])
+
+        // COL 4: Direction (or empty spacer for Button type)
+        directionPicker
+            .frame(width: dirColWidth, alignment: .leading)
+            .accessibilityLabel(directionPickerAccessibilityLabel)
+            .accessibilityValue(directionPickerAccessibilityValue)
+            .accessibilityInputLabels([Text(directionPickerAccessibilityValue), Text(directionPickerAccessibilityLabel)])
+
+        }
+        .padding(.horizontal, Self.boxPadH)
+        .padding(.vertical, Self.boxPadV)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Input")
+        .accessibilityValue(isHighlighted ? String(localized: "Firing") : "")
+    }
+
+    private var outputBox: some View {
+        VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: gap) {
+        if binding.outputs.isEmpty {
+            // A row laid out by "every control" waits here for its
+            // output; picking one creates it with that type's
+            // defaults, and the normal controls take over.
+            outputMenu(select: { type in
+                    var action = OutputAction(type: .key, keyCode: 4)
+                    action.type = type
+                    action.fillDefaultsForType()
+                    binding.outputs = [action]
+                }, selectSystemKind: { kind in
+                    var action = OutputAction(type: .systemAction, keyCode: 4)
+                    action.systemActionKind = kind
+                    binding.outputs = [action]
+                }, setParameter: { text in
+                    guard !binding.outputs.isEmpty else { return }
+                    binding.outputs[0].text = text
+                }, setAppAction: { kind, presetID in
+                    var action = OutputAction(type: .appAction)
+                    action.appActionKind = kind
+                    action.targetPresetID = presetID
+                    binding.outputs = [action]
+                }, setKey: { code in
+                    binding.outputs = [OutputAction(type: .key, keyCode: code)]
+                }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "plus.circle")
+                    Text("Choose an output")
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+                .font(.callout)
+                .foregroundStyle(Color.accentColor)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityLabel("Choose an output")
+        }
+        if !binding.outputs.isEmpty {
+            HStack(spacing: gap) {
+                outputIconCell(for: binding.outputs[0])
+
+                outputMenu(select: { firstOutputTypeBinding.wrappedValue = $0 },
+                           selectSystemKind: { kind in
+                               guard !binding.outputs.isEmpty else { return }
+                               binding.outputs[0].type = .systemAction
+                               binding.outputs[0].systemActionKind = kind
+                           },
+                           setParameter: { text in
+                               guard !binding.outputs.isEmpty else { return }
+                               binding.outputs[0].text = text
+                           },
+                           setAppAction: { kind, presetID in
+                               guard !binding.outputs.isEmpty else { return }
+                               binding.outputs[0].type = .appAction
+                               binding.outputs[0].appActionKind = kind
+                               binding.outputs[0].targetPresetID = presetID
+                           },
+                           setKey: { code in
+                               guard !binding.outputs.isEmpty else { return }
+                               binding.outputs[0].type = .key
+                               binding.outputs[0].keyCode = code
+                           },
+                           keyInShortcut: OutputAction.isShortcut(Array(binding.outputs.dropFirst()))) {
+                    menuChevronLabel(outputMenuTitle(binding.outputs[0]))
+                }
+                .menuStyle(.borderlessButton)
+                .controlSize(.small)
+                .accessibilityLabel("Output type")
+                .accessibilityValue(outputMenuTitle(binding.outputs[0]))
+                .accessibilityInputLabels([Text(outputMenuTitle(binding.outputs[0])), Text("Output type"),
+                                           Text("Output type \(displayNumber)")])
+            }
+            .frame(width: outTypeColWidth, alignment: .leading)
+
+            // Output value (flexible)
+            outputValueControls(at: 0)
+
+            if binding.outputs.count > 1 {
+                Button {
+                    removeOutput(at: 0)
+                } label: {
+                    Image(systemName: "xmark.circle")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Remove this output")
             }
         }
-        // The live mirrors only follow a drag. Once the row's committed
-        // values change (a release, Undo, Stick settings) or Options
-        // closes, drop them so a readout never shows an old value.
-        .onChange(of: binding) { _, _ in clearLiveMirrors() }
-        .onChange(of: showAdvanced) { _, open in if !open { clearLiveMirrors() } }
-        .onDisappear {
-            // Cancel any in-flight scan when this row goes away.
-            // Without this, closing the editor mid-scan leaves the
-            // static timer/subscription alive; when its 5-second
-            // deadline fires it writes into a `@Binding` whose source
-            // is gone, routing the keypress to a stale preset draft.
-            Self.cancelActiveScan()
+        Spacer(minLength: 0)
         }
+        secondaryOutputRows
+        if !binding.outputs.isEmpty {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    binding.outputs.append(OutputAction(type: .key, keyCode: 4))
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "plus.circle")
+                    Text("Add another output")
+                }
+                .font(.callout)
+                .foregroundStyle(Color.accentColor)
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 16 + gap)
+            .padding(.top, 2)
+            .accessibilityLabel("Add output")
+            .accessibilityInputLabels([Text("Add output"), Text("Add output \(displayNumber)")])
+        }
+        }
+        .padding(.horizontal, Self.boxPadH)
+        .padding(.vertical, Self.boxPadV)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Output")
+    }
+
+    private var primaryRow: some View {
+        HStack(spacing: colGap) {
+            // Drag handle, far left so the row reads handle, number, then
+            // the binding itself. This is the only drag source on the
+            // row, so menus and text never start a drag by accident.
+            // A direct drag gesture, not `.onDrag`. An NSItemProvider drag
+            // hands the reorder to AppKit's drag session: the pointer gets
+            // a small snapshot of the handle instead of the row, and every
+            // reorder decision has to round-trip through a DropDelegate,
+            // which is what made dragging feel heavy and detached. The
+            // gesture lets the parent lift the whole row under the pointer
+            // and move it in place.
+            Image(systemName: "line.3.horizontal")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(width: dragWidth, height: 22)
+                .contentShape(Rectangle())
+                .overlay(
+                    // An AppKit tracking view, not a SwiftUI DragGesture.
+                    // Two reasons. A SwiftUI gesture is torn down whenever
+                    // the row's body re-runs, so anything that changes the
+                    // row mid-drag - folding its Options away, the list
+                    // reordering - silently cancels the drag and the row
+                    // is left stranded. And SwiftUI reports translation in
+                    // a space that moves with the row we are offsetting,
+                    // which makes the reading feed on its own output and
+                    // the row shake. This view persists across body
+                    // updates and measures against the screen.
+                    RowDragHandle(
+                        onBegan: {
+                            if showAdvanced {
+                                var t = Transaction()
+                                t.disablesAnimations = true
+                                withTransaction(t) { showAdvanced = false }
+                            }
+                        },
+                        onChanged: { onDragChanged?($0) },
+                        onEnded: { onDragEnded?() }
+                    )
+                )
+                .help("Drag to reorder")
+                .accessibilityLabel("Reorder handle")
+                .accessibilityHint("Drag to reorder, or use Move Up and Move Down")
+                // Without dragging: a right-click menu (pointer, dwell and
+                // Voice Control), the arrow keys once focused (keyboard),
+                // and actions (VoiceOver, Switch Control).
+                .contextMenu {
+                    Button("Move Up") { onMove?(-1) }
+                    Button("Move Down") { onMove?(1) }
+                }
+                .focusable(onMove != nil)
+                .onKeyPress(.upArrow) { onMove?(-1); return onMove == nil ? .ignored : .handled }
+                .onKeyPress(.downArrow) { onMove?(1); return onMove == nil ? .ignored : .handled }
+                .accessibilityAction(named: "Move Up") { onMove?(-1) }
+                .accessibilityAction(named: "Move Down") { onMove?(1) }
+
+            // Row number chip - matches the number shown in the Live
+            // Visualizer popover so users can find the right row when
+            // they click an input on the visualizer.
+            if displayNumber > 0 {
+                Text("#\(displayNumber)")
+                    .font(.callout.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.secondary.opacity(0.12))
+                    )
+                    .frame(width: numberColWidth, alignment: .leading)
+            }
+
+            // Non-color firing cue: the green highlight alone isn't
+            // distinguishable with Differentiate Without Color on, so add
+            // a bolt while the row is firing. VoiceOver hears the firing
+            // state from the Input box's value, hence the hidden marker.
+            if isHighlighted && differentiateWithoutColor {
+                Image(systemName: "bolt.fill")
+                    .font(.callout)
+                    .iconTint(.green)
+                    .accessibilityHidden(true)
+            }
+
+            // INPUT box: scan + type + index + direction, enclosed so
+            // the row reads as "this input" -> "these outputs".
+            inputBox
+
+            // Fixed-position arrow right after the input columns. The two
+            // flexible `maxWidth: .infinity` halves that used to center it
+            // forced SwiftUI to renegotiate each row's width with repeated
+            // sizeThatFits probes; on a large preset that pegged the main
+            // thread solid. Only the output side stays flexible now, so the
+            // row lays out in a single pass.
+            firingArrow
+
+            // OUTPUT box: icon + type + value, with any extra outputs
+            // stacked beneath inside the same box. Row actions sit
+            // outside it at the trailing edge.
+            outputBox
+
+            // Actions: copy and delete. Adding an output is a labeled
+            // button under the outputs, not a corner icon.
+            HStack(spacing: 3) {
+                if let onDuplicate {
+                    CopyIconButton(action: onDuplicate,
+                                   helpText: "Duplicate this binding",
+                                   announcement: nil)
+                        .accessibilityLabel("Duplicate this binding")
+                }
+
+                Button(action: onRemove) {
+                    Image(systemName: "minus.circle.fill")
+                        .foregroundStyle(.red.opacity(0.7))
+                        .font(.callout)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Remove binding")
+                .accessibilityInputLabels([Text("Remove binding"), Text("Remove binding \(displayNumber)")])
+            }
+            .frame(width: actionsWidth + 18, alignment: .trailing)
+        }
+    }
+
+    private var deadzoneCalibrationSheet: some View {
+        DeadzoneCalibrationView(
+            axisIndex: binding.input.type == .stickRegion ? zoneRowAxis : binding.input.index,
+            deadzone: deadzoneCalibrationBinding,
+            outerDeadzone: outerDeadzoneBinding,
+            isInverted: binding.invertAxis ?? false,
+            onClose: { showDeadzoneCalibration = false },
+            slot: slot,
+            rowID: binding.id,
+            zonesKey: zonesSheetKey,
+            direction: binding.input.type == .axis ? binding.input.axisDirection : nil,
+            fullTravel: binding.fullTravel == true
+        )
+        .glassBackground()
     }
 
     @AccessibilityFocusState private var jumpFocus: Bool

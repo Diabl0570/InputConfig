@@ -634,7 +634,10 @@ final class TestBenchService: ObservableObject {
         let o6: [UInt8] = HIDFixture.parse("31 02 ff ff" + String(repeating: " 00", count: 70) + " 4c 7a ec 13")
         record(cat, "Access LED O6 dismiss frame", pass: S.ledDismissReport() == o6)
         let sweep = S.ledReport(rgb: nil, player: 0, profileLEDMode: 3)
-        let forbiddenClear = [full, sweep].allSatisfy { $0[1] & 0x60 == 0 && $0[9] == 0 && $0.count == 32 }
+        let forbiddenClear = [full, sweep].allSatisfy { (report: [UInt8]) -> Bool in
+            let forbiddenBitsClear = (report[1] & UInt8(0x60)) == 0
+            return forbiddenBitsClear && report[9] == 0 && report.count == 32
+        }
         record(cat, "Access LED O7 forbidden bits never set", pass: forbiddenClear && ledBT.count == 78 && ledBT[10] == 0)
         record(cat, "Read commands", pass: S.readCommand(number: 0)[1] == 0x0F && S.readCommand(number: 1)[1] == 0x10
                && S.readCommand(number: 3)[1] == 0x12 && S.readCommand(number: 2).count == 64 && S.readCommand(number: 2)[0] == 0x60)

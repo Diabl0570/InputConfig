@@ -785,12 +785,7 @@ struct PresetEditorView: View {
             // mouse motion uses the user's actual touchpad bounds.
             .confirmationDialog(
                 pendingScanMapping?.event.displayName ?? String(localized: "Scanned input"),
-                isPresented: Binding(
-                    get: { pendingScanMapping != nil },
-                    set: { newValue in
-                        if newValue == false { pendingScanMapping = nil }
-                    }
-                ),
+                isPresented: isScanMappingPresented,
                 titleVisibility: .visible
             ) {
                 if let pending = pendingScanMapping {
@@ -903,6 +898,15 @@ struct PresetEditorView: View {
     /// The editor's gesture rows, so each lights when its gesture is made,
     /// and its axis rows, so each lights at its own deadzone.
     /// The editor's live lights end with it.
+    private var isScanMappingPresented: Binding<Bool> {
+        Binding<Bool>(
+            get: { pendingScanMapping != nil },
+            set: { newValue in
+                if !newValue { pendingScanMapping = nil }
+            }
+        )
+    }
+
     private var presetSearchBar: some View {
         PresetSearchBar(preset: preset, naming: { [controllerService, preset] g in
             let slots = controllerService.effectiveSlots(for: preset.joysticks)
@@ -932,11 +936,15 @@ struct PresetEditorView: View {
             .compactMap { row in row.input.stickRegionID.map {
                 GameControllerService.LiveZoneRow(id: row.id, key: row.input.index, zone: $0,
                                                   deadzone: Double(row.deadzone ?? 0.25), invert: row.invertAxis == true) } }
-        controllerService.liveTakeoverZones = preset.joysticks.flatMap(\.bindings)
+        let takeoverBindings: [BindingModel] = preset.joysticks.flatMap(\.bindings)
             .filter { $0.input.type == .stickRegion && $0.zoneSharesStick == false }
-            .compactMap { row in row.input.stickRegionID.map {
-                (key: row.input.index, id: $0, deadzone: Double(row.deadzone ?? 0.25), invert: row.invertAxis == true,
-                 rowID: row.id, modifiers: row.modifiers.map(\.serialized)) } }
+        controllerService.liveTakeoverZones = takeoverBindings.compactMap { row in
+            guard let zoneID = row.input.stickRegionID else { return nil }
+            let deadzone = Double(row.deadzone ?? 0.25)
+            let modifiers: [String] = row.modifiers.map(\.serialized)
+            return (key: row.input.index, id: zoneID, deadzone: deadzone,
+                    invert: row.invertAxis == true, rowID: row.id, modifiers: modifiers)
+        }
         controllerService.liveAxisRows = preset.joysticks.flatMap(\.bindings)
             .filter { $0.input.type == .axis }
             .map { GameControllerService.LiveAxisRow(id: $0.id, index: $0.input.index, direction: $0.input.axisDirection,
