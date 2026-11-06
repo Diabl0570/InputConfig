@@ -1567,7 +1567,7 @@ extension OutputAction {
 
     /// Worth listing when a preset is imported: anything that opens
     /// something, and Type Text.
-    var isAutomationAction: Bool { opensSomething || type == .typeText }
+    var isAutomationAction: Bool { opensSomething || type == .typeText || targetApplicationBundleID != nil }
 
     /// Lock Screen and switching presets: listed on import, not removed.
     var isNotableOnImport: Bool {
@@ -1582,6 +1582,10 @@ extension OutputAction {
             .replacingOccurrences(of: "\n", with: " \u{21B5} ")
             .trimmingCharacters(in: .whitespaces)
         switch type {
+        case .key where targetApplicationBundleID != nil:
+            return displayName
+        case .systemAction where systemActionKind == .openApp && !(launchArguments ?? []).isEmpty:
+            return "\(SystemActionKind.openApp.displayName): \(detail) \((launchArguments ?? []).joined(separator: " "))"
         case .typeText:
             return detail.isEmpty ? String(localized: "Types text") : String(localized: "Types text: \(detail)")
         case .systemAction where systemActionKind == .openURL:

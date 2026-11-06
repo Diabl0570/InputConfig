@@ -44,6 +44,7 @@ final class TestBenchService: ObservableObject {
         defer { isRunning = false }
 
         runOutputActionTests()
+        runMigrationCompatibilityTests()
         runInputEventTests()
         runExtraButtonsAndKeysTests()
         runSensitivityCurveTests()
@@ -143,6 +144,41 @@ final class TestBenchService: ObservableObject {
             record("OutputAction", label, pass: same,
                    detail: "\"\(serialized)\" \(same ? "round-trips correctly" : "did not match after parse")")
         }
+    }
+
+    func runMigrationCompatibilityTests() {
+        let cat = "Controller migration"
+        var target = OutputAction(type: .key, keyCode: 109)
+        target.targetApplicationBundleID = "com.openai.codex"
+        var launch = OutputAction(type: .systemAction, text: "/Applications/AltTab.app", systemActionKind: .openApp)
+        launch.launchArguments = ["--show=0"]
+        for action in [target, launch] {
+            let decoded = try? JSONDecoder().decode(OutputAction.self, from: JSONEncoder().encode(action))
+            record(cat, "JSON preserves \(action.displayName)", pass: decoded == action)
+            record(cat, "Import review shows the action", pass: action.isAutomationAction && !action.importReviewLine.isEmpty)
+        }
+        #if DEBUG
+        let previousSink = InputSimulator.debugEventSink
+        defer { InputSimulator.debugEventSink = previousSink }
+        var events: [CGEvent] = []
+        InputSimulator.debugEventSink = { events.append($0) }
+        if let bundleID = Bundle.main.bundleIdentifier {
+            InputSimulator.shared.tapKey(109, chord: [109], inApplication: bundleID)
+            record(cat, "Targeted F18 sends a down/up pair", pass: events.map(\.type) == [.keyDown, .keyUp])
+            record(cat, "Targeted F18 uses the macOS key code", pass: events.count == 2 && events.allSatisfy {
+                $0.getIntegerValueField(.keyboardEventKeycode) == 79
+            })
+            record(cat, "Targeted F18 stays with the selected process", pass: events.count == 2 && events.allSatisfy {
+                $0.getIntegerValueField(.eventTargetUnixProcessID) == Int64(ProcessInfo.processInfo.processIdentifier)
+            })
+            record(cat, "Targeted events retain the input-loop guard", pass: events.count == 2 && events.allSatisfy {
+                $0.getIntegerValueField(.eventSourceUserData) == InputSimulator.ownEventMarker
+            })
+        }
+        events.removeAll()
+        InputSimulator.shared.tapKey(109, chord: [109], inApplication: "invalid.inputconfig.migration-test")
+        record(cat, "Missing target never types into the frontmost app", pass: events.isEmpty)
+        #endif
     }
 
     // MARK: - 2. InputEvent Round-Trip Tests

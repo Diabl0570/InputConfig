@@ -413,6 +413,7 @@ extension OutputAction {
     static func names(_ outputs: [OutputAction]) -> [String] {
         let shortcut = isShortcut(outputs)
         return outputs.map { o in
+            if o.targetApplicationBundleID != nil { return o.displayName }
             if o.type == .key, let code = o.keyCode { return KeyCodeMap.outputName(for: code, inShortcut: shortcut) }
             return o.displayName
         }
@@ -424,6 +425,10 @@ struct OutputAction: Codable, Hashable, Identifiable {
 
     var type: OutputType
     var keyCode: Int?
+    /// A targeted key is tapped in this app without activating it.
+    var targetApplicationBundleID: String?
+    /// Arguments passed to an Open App output as separate values, never a shell command.
+    var launchArguments: [String]?
     var mouseButtonIndex: Int?
     /// Optional fixed screen point for a mouse button output, in CoreGraphics
     /// coordinates (origin top-left of the main display). When set the
@@ -505,7 +510,9 @@ struct OutputAction: Codable, Hashable, Identifiable {
         switch type {
         case .key:
             if let code = keyCode {
-                return KeyCodeMap.outputName(for: code, inShortcut: false)
+                let name = KeyCodeMap.outputName(for: code, inShortcut: false)
+                if let target = targetApplicationBundleID { return "\(name) → \(target)" }
+                return name
             }
             return String(localized: "Key")
         case .mouseButton:
@@ -812,6 +819,7 @@ struct OutputAction: Codable, Hashable, Identifiable {
     // parked on a screen point was shown in the row and lost on relaunch.
     enum CodingKeys: String, CodingKey {
         case id, type, keyCode, mouseButtonIndex, clickX, clickY, mouseAxis, mouseDirection, speed
+        case targetApplicationBundleID, launchArguments
         case midiNote, midiVelocity, midiCCNumber, midiCCValue, midiChannel
         case midiProgramNumber, midiTransport
         case text

@@ -69,13 +69,15 @@ final class InputSimulator: @unchecked Sendable {
         lastPostLock.unlock()
     }
 
-    fileprivate func taggedPost(_ event: CGEvent) {
+    fileprivate func taggedPost(_ event: CGEvent, to pid: pid_t? = nil) {
         Self.notePost(event.type)
         event.setIntegerValueField(.eventSourceUserData, value: Self.ownEventMarker)
+        if let pid { event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(pid)) }
         #if DEBUG
         if let sink = Self.debugEventSink { sink(event); return }
         #endif
-        event.post(tap: .cghidEventTap)
+        if let pid { event.postToPid(pid) }
+        else { event.post(tap: .cghidEventTap) }
     }
 
     #if DEBUG
@@ -86,6 +88,23 @@ final class InputSimulator: @unchecked Sendable {
     #endif
 
     // MARK: - Keyboard Simulation
+
+    func tapKey(_ hidCode: Int, chord: [Int], inApplication bundleID: String) {
+        guard modifierFlags(for: hidCode) == nil,
+              let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first,
+              !app.isTerminated,
+              let virtualCode = virtualCode(for: hidCode, scope: Set(chord)) else { return }
+        var flags = keyOwnFlagBits(virtualCode)
+        for code in chord {
+            if let flag = modifierFlags(for: code) { flags.formUnion(flag) }
+        }
+        for down in [true, false] {
+            guard let event = CGEvent(keyboardEventSource: eventSource,
+                                      virtualKey: CGKeyCode(virtualCode), keyDown: down) else { continue }
+            event.flags = flags
+            taggedPost(event, to: app.processIdentifier)
+        }
+    }
 
     /// Modifiers held by a row that presses nothing else: a button mapped to
     /// Shift or Command on its own, or a macro's Down step. Those combine
@@ -2157,7 +2176,7 @@ final class SystemActionService: @unchecked Sendable {
     /// sixteen steps from silent to full.
     private let volumeStep: Float = 1.0 / 16.0
 
-    func perform(_ kind: SystemActionKind, parameter: String?) {
+    func perform(_ kind: SystemActionKind, parameter: String?, arguments: [String]? = nil) {
         switch kind {
         case .volumeUp: nudgeVolume(by: volumeStep)
         case .volumeDown: nudgeVolume(by: -volumeStep)
@@ -2198,7 +2217,7 @@ final class SystemActionService: @unchecked Sendable {
             if !name.isEmpty { runShortcut(named: name) }
         case .openApp:
             let target = (parameter ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !target.isEmpty { openApp(target) }
+            if !target.isEmpty { openApp(target, arguments: arguments ?? []) }
         case .openURL:
             // Trimmed: a pasted link with a space around it opened nothing.
             let raw = (parameter ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2642,11 +2661,16 @@ final class SystemActionService: @unchecked Sendable {
         return out
     }
 
-    private func openApp(_ target: String) {
+    private func openApp(_ target: String, arguments: [String] = []) {
         #if DEBUG
         if TestCapture.active { TestCapture.note("open app \(target)"); return }
         #endif
         let config = NSWorkspace.OpenConfiguration()
+        if !arguments.isEmpty {
+            config.arguments = arguments
+            config.createsNewApplicationInstance = true
+            config.activates = false
+        }
         let url: URL? = {
             if target.hasPrefix("/") { return URL(fileURLWithPath: target) }
             // The usual places first, one file check each, as 1.5 did; the

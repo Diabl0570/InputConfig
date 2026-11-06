@@ -4185,7 +4185,11 @@ class MappingEngine: ObservableObject {
             switch output.type {
             case .key:
                 if let code = output.keyCode {
-                    if press {
+                    if let target = output.targetApplicationBundleID {
+                        if press {
+                            InputSimulator.shared.tapKey(code, chord: chordKeys, inApplication: target)
+                        }
+                    } else if press {
                         InputSimulator.shared.keyDown(code, chord: chordKeys, owner: owner, repeats: repeats)
                     } else {
                         InputSimulator.shared.keyUp(code, owner: owner)
@@ -4241,7 +4245,7 @@ class MappingEngine: ObservableObject {
                 // half. Hold + turbo and Turn-mode knobs repeat naturally
                 // because each pulse is a fresh press edge.
                 if press, let kind = output.systemActionKind {
-                    SystemActionService.shared.perform(kind, parameter: output.text)
+                    SystemActionService.shared.perform(kind, parameter: output.text, arguments: output.launchArguments)
                 }
 
             case .mouseMotion, .mouseWheel:

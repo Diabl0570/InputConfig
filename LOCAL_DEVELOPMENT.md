@@ -81,3 +81,27 @@ and the app opened to its welcome screen. The embedded Steam Controller helper
 contains both arm64 and x86_64 architectures. The build still reports upstream
 compiler warnings. Controller input, permissions, and the built-in test bench
 were not exercised.
+
+## Native preset compatibility
+
+Native JSON key outputs can carry `targetApplicationBundleID`. They send a
+press/release pair to that running application without activating it. An absent
+target sends nothing; it never falls back to typing into the frontmost app.
+
+An Open App output can carry `launchArguments`, an array passed directly through
+`NSWorkspace.OpenConfiguration`. Arguments launch a separate application instance;
+they are never interpreted by a shell. The import review displays the arguments,
+and its default removal of app-opening actions still applies. These optional
+fields use the native JSON format; legacy text output strings do not carry them.
+
+Verified on 6 November 2026: all 478 built-in diagnostics pass, including native
+JSON round trips for these fields, F18 event encoding and process targeting,
+input-loop markers, and suppression when the target application is absent.
+No controller was connected for the check.
+
+- Public ports changed: optional native preset JSON fields
+  `targetApplicationBundleID` and `launchArguments`.
+- Protected paths touched: application-targeted input and application launching.
+  Existing import review includes both kinds of action; arguments do not use a shell.
+- Evidence: successful Xcode build, code signature verification, 478 passing
+  diagnostics, and visible migrated presets in the local app.
